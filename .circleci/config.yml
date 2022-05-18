@@ -1,0 +1,229 @@
+# Use the latest 2.1 version of CircleCI pipeline process engine.
+# See: https://circleci.com/docs/2.0/configuration-reference
+version: 2.1
+
+orbs: 
+  terraform: circleci/terraform@3.0.1
+
+parameters:
+  workflow-id:
+    type: string
+    default: "${CIRCLE_WORKFLOW_ID:0:7}"
+  build_enviroment:
+    type: boolean
+    default: false
+
+# Define a job to be invoked later in a workflow.
+# See: https://circleci.com/docs/2.0/configuration-reference/#jobs
+jobs:
+  iglu-variable-prep:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Clone Quickstart Repo
+          command: |
+            git clone https://github.com/snowplow/quickstart-examples.git
+      - run: 
+          name: Patching Iglu Vars File
+          command: |
+            bash -x ./scripts/patch_iglu_vars.sh
+            echo "Terraform files have been patched with ENV Vars"
+      - run: 
+          name: Patching Terraform Versions File
+          command: |
+            cp terraform_files/iglu/versions.tf quickstart-examples/terraform/aws/iglu_server/default/versions.tf
+            cat quickstart-examples/terraform/aws/iglu_server/default/versions.tf
+            echo "Terraform version file has been patched to save state to S3"
+      - persist_to_workspace:
+          root: /home/circleci/project
+          paths:
+            - quickstart-examples
+
+  iglu-server-build:
+    docker:
+      - image: hashicorp/terraform:1.0.0
+    steps:
+      - checkout
+      - attach_workspace:
+          # Must be absolute path or relative path from working_directory
+          at: /home/circleci/project
+      - run:    
+          name: Deploying Terraform 
+          command: |
+              cd /home/circleci/project/quickstart-examples/terraform/aws/iglu_server/default
+              echo "My current workspace is : $(pwd)" 
+              echo "Lets Deploy the Server"
+              terraform init
+              terraform apply -auto-approve
+      - run:
+          name: Storing Terraform Outputs
+          command: |
+            mkdir /home/circleci/project/terraform_outputs
+            cd /home/circleci/project/quickstart-examples/terraform/aws/iglu_server/default
+            echo $(terraform output iglu_server_dns_name) > /home/circleci/project/terraform_outputs/iglu_server.txt
+            cat /home/circleci/project/terraform_outputs/iglu_server.txt
+
+      - persist_to_workspace:
+          root: /home/circleci/project
+          paths:
+            - terraform_outputs
+
+  iglu-server-seed:
+    docker:
+      - image: openjdk:oraclelinux8
+    steps:
+      - checkout
+      - run:
+          name: Install utils
+          command: |
+            microdnf install -y tar unzip java wget git 
+      - attach_workspace:
+          # Must be absolute path or relative path from working_directory
+          at: /home/circleci/project    
+      - run:    
+          name: Installing IgluCLI
+          command: |
+              cd /home/circleci/project/quickstart-examples/terraform/aws/iglu_server/default
+              wget https://github.com/snowplow-incubator/igluctl/releases/download/0.8.1/igluctl_0.8.1.zip
+              unzip igluctl_0.8.1.zip
+              chmod +x igluctl
+              cp igluctl /usr/local/bin/
+              igluctl --version
+      - run:    
+          name: Seed Iglu Server 
+          command: |
+              git clone https://github.com/snowplow/iglu-central /home/circleci/iglu-central
+              cd /home/circleci/iglu-central
+              export IGLU_URL=$(cat /home/circleci/project/terraform_outputs/iglu_server.txt| sed 's/"//g')
+              igluctl static push --public schemas/ http://$IGLU_URL $IGLU_API_KEY
+
+  pipeline-variable-prep:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Clone Quickstart Repo
+          command: |
+            git clone https://github.com/snowplow/quickstart-examples.git
+      - run: 
+          name: Patching Iglu Vars File
+          command: |
+            bash -x ./scripts/patch_pipeline_vars.sh
+            echo "Terraform files have been patched with ENV Vars"
+      - run: 
+          name: Patching Terraform Versions File
+          command: |
+            cp terraform_files/pipeline/versions.tf quickstart-examples/terraform/aws/pipeline/default/versions.tf
+            cat quickstart-examples/terraform/aws/pipeline/default/versions.tf
+            echo "Terraform version file has been patched to save state to S3"
+      - persist_to_workspace:
+          root: /home/circleci/project
+          paths:
+            - quickstart-examples
+
+  pipeline-build:
+    docker:
+      - image: hashicorp/terraform:1.0.0
+    steps:
+      - checkout
+      - attach_workspace:
+          # Must be absolute path or relative path from working_directory
+          at: /home/circleci/project
+      - run:    
+          name: Deploying Terraform 
+          command: |
+              cd /home/circleci/project/quickstart-examples/terraform/aws/pipeline/default
+              echo "My current workspace is : $(pwd)" 
+              echo "Lets Deploy the Server"
+              terraform init
+              terraform apply -auto-approve
+      - run:
+          name: Storing Terraform Outputs
+          command: |
+            cd /home/circleci/project/quickstart-examples/terraform/aws/pipeline/default
+            echo $(terraform output) > /home/circleci/project/terraform_outputs/pipeline_deployment.txt
+            cat /home/circleci/project/terraform_outputs/pipeline_deployment.txt
+      - persist_to_workspace:
+          root: /home/circleci/project
+          paths:
+            - terraform_outputs
+
+
+
+  iglu-destroy:
+    docker:
+      - image: hashicorp/terraform:1.0.0
+    steps:
+      - checkout
+      - attach_workspace:
+          # Must be absolute path or relative path from working_directory
+          at: /home/circleci/project
+      - run:    
+          name: Deploying Terraform 
+          command: |
+              cd /home/circleci/project/quickstart-examples/terraform/aws/iglu_server/default
+              echo "My current workspace is : $(pwd)" 
+              echo "Lets Deploy the Server"
+              terraform init
+              terraform destroy -auto-approve
+
+  pipeline-destroy:
+    docker:
+      - image: hashicorp/terraform:1.0.0
+    steps:
+      - checkout
+      - attach_workspace:
+          # Must be absolute path or relative path from working_directory
+          at: /home/circleci/project
+      - run:    
+          name: Deploying Terraform 
+          command: |
+              cd /home/circleci/project/quickstart-examples/terraform/aws/pipeline/default
+              echo "My current workspace is : $(pwd)" 
+              echo "Lets Deploy the Server"
+              terraform init
+              terraform destroy -auto-approve
+
+# Invoke jobs via workflows
+# See: https://circleci.com/docs/2.0/configuration-reference/#workflows
+workflows:
+
+
+  quickstart-pipeline-deployment:
+    when:
+        equal: [ true, << pipeline.parameters.build_enviroment>> ] 
+    jobs:
+      - iglu-variable-prep
+      - iglu-server-build:
+          requires:
+            - iglu-variable-prep
+      - iglu-server-seed:
+          requires:
+            - iglu-server-build
+      - pipeline-variable-prep:
+          requires:
+            - iglu-server-build
+      - pipeline-build:
+          requires:
+            - pipeline-variable-prep
+  quickstart-pipeline-teardown:
+    when:
+        equal: [ false, << pipeline.parameters.build_enviroment>> ]
+    jobs:     
+      - iglu-variable-prep
+      - iglu-server-build:
+          requires:
+            - iglu-variable-prep
+      - iglu-destroy:
+          requires:
+            - iglu-server-build     
+      - pipeline-variable-prep:
+          requires:
+            - iglu-server-build
+      - pipeline-destroy:
+          requires:
+            - pipeline-variable-prep
+      
